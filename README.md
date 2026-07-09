@@ -1,8 +1,14 @@
 # No Sleep Till Brooklyn
 
+[![build](https://github.com/vladimirgamalyan/no-sleep-till-brooklyn/actions/workflows/build.yml/badge.svg)](https://github.com/vladimirgamalyan/no-sleep-till-brooklyn/actions/workflows/build.yml)
+
 A tiny "caffeine" utility for Windows 11 — an analogue of the Mac *Caffeine*
 app. It has **no window**: it lives as a system-tray icon. While it runs it
 keeps the machine awake and the display on; exit from the tray menu to stop.
+
+A prebuilt `NoSleepTillBrooklyn.exe` is attached to every
+[release](https://github.com/vladimirgamalyan/no-sleep-till-brooklyn/releases),
+built by GitHub Actions. To build it yourself, see [Build](#build) below.
 
 ## What it does
 
