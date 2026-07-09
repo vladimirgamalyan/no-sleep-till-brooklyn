@@ -1,0 +1,6 @@
+# Statically link the MSVC C runtime so the resulting exe is fully
+# self-contained and runs on a clean Windows 11 without the VC++ redistributable.
+# This is applied to the default host build, so `cargo build --release`
+# still emits target/release/NoSleepTillBrooklyn.exe.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
