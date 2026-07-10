@@ -9,3 +9,6 @@
 
 ## Code Guidelines
 Follow the behavioral rules in @CODE_GUIDELINES.md
+
+## Tooling
+- Run GitHub CLI (`gh`) commands outside the sandbox.
