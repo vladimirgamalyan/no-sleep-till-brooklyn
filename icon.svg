@@ -1,10 +1,10 @@
-<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="104 42 189 158" width="189" height="158" preserveAspectRatio="none">
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="96.9 42.85 203.2 156.3" width="203.2" height="156.3" preserveAspectRatio="none">
 	<style>
 		.s0 { fill: #ff0808;stroke: #ff0000;stroke-linecap: round;stroke-linejoin: round;stroke-width: 14 }
-		.s1 { fill: #ffffff;stroke: #000000;stroke-width: 14 }
+		.s1 { fill: #ffffff;stroke: #000000;stroke-width: 30 }
 	</style>
 	<g id="Layer 1">
-		<path class="s0" d="m111 121c39.21-94.73 135.79-94.73 175 0-39.21 94.73-135.79 94.73-175 0z"/>
+		<path class="s0" d="m104 121c42.35-94.73 146.65-94.73 189 0-42.35 94.73-146.65 94.73-189 0z"/>
 		<path class="s1" d="m198.5 152c-17.14 0-31-13.86-31-31 0-17.14 13.86-31 31-31 17.14 0 31 13.86 31 31 0 17.14-13.86 31-31 31z"/>
 	</g>
 </svg>
