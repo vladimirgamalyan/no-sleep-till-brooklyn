@@ -1,6 +1,6 @@
 // No Sleep Till Brooklyn — a tiny "caffeine" utility for Windows 11.
 //
-// The app has no window: it lives as a system-tray icon. While it runs it
+// The app has no visible window: it lives as a system-tray icon. While it runs it
 // periodically taps the F15 key and asks the system to stay awake, so the
 // display never dims and the machine never locks or sleeps on idle.
 // Right-click the tray icon and choose Exit to stop and quit.
@@ -9,6 +9,7 @@
 extern crate native_windows_derive as nwd;
 extern crate native_windows_gui as nwg;
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use nwd::NwgUi;
@@ -26,16 +27,29 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VK_F15,
 };
+use windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
 
 /// Interval between F15 keypresses, in seconds.
 const KEYPRESS_INTERVAL_SECS: u64 = 59;
 
+/// Tooltip shown when hovering the tray icon.
+const TRAY_TIP: &str = "No Sleep Till Brooklyn";
+
+/// Id of the raw handler that watches for `TaskbarCreated`. Ids up to 0xFFFF
+/// are reserved by native-windows-gui.
+const TASKBAR_CREATED_HANDLER_ID: usize = 0x1_0000;
+
 #[derive(Default, NwgUi)]
 pub struct NoSleepTray {
-    // Message-only window: it hosts the tray icon and menu but is never shown,
-    // so there is no window and no taskbar button.
-    #[nwg_control]
-    window: nwg::MessageWindow,
+    // Hosts the tray icon and menu. Created without VISIBLE and never shown, so
+    // there is no window on screen and no taskbar button.
+    //
+    // It must be a real top-level window rather than a MessageWindow: the shell
+    // announces a rebuilt notification area by broadcasting `TaskbarCreated`,
+    // and message-only windows do not receive broadcast messages.
+    #[nwg_control(flags: "WINDOW", title: "No Sleep Till Brooklyn")]
+    #[nwg_events(OnInit: [NoSleepTray::on_init(RC_SELF)])]
+    window: nwg::Window,
 
     // Loads the app icon compiled into the exe (icon.rc, RT_GROUP_ICON id 1).
     #[nwg_resource]
@@ -44,7 +58,7 @@ pub struct NoSleepTray {
     #[nwg_resource(source_embed: Some(&data.embed), source_embed_id: 1)]
     icon: nwg::Icon,
 
-    #[nwg_control(icon: Some(&data.icon), tip: Some("No Sleep Till Brooklyn"))]
+    #[nwg_control(icon: Some(&data.icon), tip: Some(TRAY_TIP))]
     #[nwg_events(MousePressLeftUp: [NoSleepTray::show_menu], OnContextMenu: [NoSleepTray::show_menu])]
     tray: nwg::TrayNotification,
 
@@ -74,6 +88,58 @@ pub struct NoSleepTray {
 }
 
 impl NoSleepTray {
+    /// Start watching for `TaskbarCreated`, which the shell broadcasts whenever
+    /// it rebuilds the notification area (typically after Explorer restarts or
+    /// crashes). Every tray icon is dropped when that happens, and only a fresh
+    /// `NIM_ADD` brings it back — otherwise the app keeps running with no icon
+    /// and no way to reach its menu.
+    fn on_init(rc_self: &Rc<NoSleepTray>) {
+        let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+        if taskbar_created == 0 {
+            return;
+        }
+
+        // Weak, so the handler does not keep the UI alive: a strong reference
+        // here would be a cycle through the window the handler is bound to, and
+        // TrayNotification's Drop (which removes the icon) would never run.
+        let ui = Rc::downgrade(rc_self);
+        let _ = nwg::bind_raw_event_handler(
+            &rc_self.window.handle,
+            TASKBAR_CREATED_HANDLER_ID,
+            move |_hwnd, msg, _w, _l| {
+                if msg == taskbar_created {
+                    if let Some(ui) = ui.upgrade() {
+                        ui.readd_tray_icon();
+                    }
+                }
+                None
+            },
+        );
+    }
+
+    /// Add the tray icon to the notification area again.
+    ///
+    /// `NIM_ADD` is only ever issued by TrayNotification's builder, so the
+    /// builder is re-run into a throwaway value. A tray handle is derived from
+    /// its parent window, so the rebuilt icon gets the same handle as `self.tray`
+    /// and the event bindings made at startup keep matching it.
+    ///
+    /// The throwaway is forgotten rather than dropped: its Drop would issue
+    /// `NIM_DELETE` and undo the icon that was just restored. It owns no memory,
+    /// and `self.tray` still removes the icon on exit.
+    fn readd_tray_icon(&self) {
+        let mut tray = nwg::TrayNotification::default();
+        let rebuilt = nwg::TrayNotification::builder()
+            .parent(&self.window)
+            .icon(Some(&self.icon))
+            .tip(Some(TRAY_TIP))
+            .build(&mut tray);
+
+        if rebuilt.is_ok() {
+            std::mem::forget(tray);
+        }
+    }
+
     fn on_tick(&self) {
         send_f15();
     }
