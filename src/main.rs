@@ -127,6 +127,10 @@ impl NoSleepTray {
     /// The throwaway is forgotten rather than dropped: its Drop would issue
     /// `NIM_DELETE` and undo the icon that was just restored. It owns no memory,
     /// and `self.tray` still removes the icon on exit.
+    ///
+    /// Safe to call when the icon is already present — the shell rejects a
+    /// duplicate `NIM_ADD` and leaves the existing icon alone — so callers do
+    /// not need to know whether it is missing.
     fn readd_tray_icon(&self) {
         let mut tray = nwg::TrayNotification::default();
         let rebuilt = nwg::TrayNotification::builder()
@@ -166,7 +170,17 @@ impl NoSleepTray {
     }
 
     /// Balloon shown when a second copy is started while this one is running.
+    ///
+    /// Doubles as a manual recovery hatch. The named event that triggers this
+    /// does not go through the tray, so it arrives even when the icon is gone —
+    /// and relaunching is exactly what a user does when they cannot find it.
+    /// Restoring the icon first also un-breaks the balloon below, which is a
+    /// `NIM_MODIFY` on that icon and silently does nothing while it is missing.
+    ///
+    /// `readd_tray_icon` covers what `TaskbarCreated` cannot: an `NIM_ADD` that
+    /// failed at startup is never announced or retried by anything else.
     fn show_already_running_banner(&self) {
+        self.readd_tray_icon();
         self.show_banner(
             "Already running — no second copy started. Right-click the tray icon to exit.",
         );

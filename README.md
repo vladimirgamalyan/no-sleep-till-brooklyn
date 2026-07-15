@@ -30,6 +30,8 @@ built by GitHub Actions. To build it yourself, see [Build](#build) below.
   launch exit silently (no window). Before it exits it pokes the running copy
   (via a named event) to show an "already running" tray notification, distinct
   from the one shown at first launch.
+- **Relaunching restores a missing tray icon**: the running copy re-registers its
+  icon when poked, so if the icon is ever gone, simply start the app again.
 
 ## System tray
 
@@ -62,6 +64,19 @@ is then stuck awake and unreachable until it is killed from Task Manager.
 
 So the host window is top-level, and on `TaskbarCreated` the app re-registers
 its tray icon.
+
+### The relaunch fallback
+
+The running copy also re-registers its icon whenever a second launch pokes it
+through the single-instance named event. That path does not touch the tray, so
+it arrives even when the icon is gone.
+
+This covers what `TaskbarCreated` cannot. Nothing retries the *initial*
+`NIM_ADD`, and `native-windows-gui` discards its result, so an icon that failed
+to register at startup — with the shell already up, and therefore no
+`TaskbarCreated` coming — would stay missing with nothing to notice. It also
+makes the obvious human reaction to a missing icon, starting the app again, do
+the right thing rather than exit silently.
 
 ## Build
 
