@@ -15,19 +15,24 @@ use std::time::Duration;
 use nwd::NwgUi;
 use nwg::NativeUi;
 
-use windows::core::w;
-use windows::Win32::Foundation::{GetLastError, BOOL, ERROR_ALREADY_EXISTS};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS, HANDLE, LPARAM, WPARAM,
+};
 use windows::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE,
+    CreateEventW, CreateMutexW, OpenMutexW, SetEvent, WaitForSingleObject, INFINITE,
+    SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VK_F15,
 };
-use windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    RegisterWindowMessageW, SendMessageW, HWND_BROADCAST, SC_MONITORPOWER, WM_SYSCOMMAND,
+};
 
 /// Interval between F15 keypresses, in seconds.
 const KEYPRESS_INTERVAL_SECS: u64 = 59;
@@ -38,6 +43,25 @@ const TRAY_TIP: &str = "No Sleep Till Brooklyn";
 /// Id of the raw handler that watches for `TaskbarCreated`. Ids up to 0xFFFF
 /// are reserved by native-windows-gui.
 const TASKBAR_CREATED_HANDLER_ID: usize = 0x1_0000;
+
+/// Event a plain second launch signals to make the running copy re-show its
+/// tray banner and restore its icon.
+const BANNER_EVENT: PCWSTR = w!("NoSleepTillBrooklyn-ShowBanner-8f3c2a17");
+
+/// Event a `--quit` launch signals to make the running copy shut down.
+const QUIT_EVENT: PCWSTR = w!("NoSleepTillBrooklyn-Quit-8f3c2a17");
+
+/// The single-instance mutex. Also serves as the liveness marker of the running
+/// copy: a named object exists only while some handle to it is open.
+const SINGLE_INSTANCE_MUTEX: PCWSTR = w!("NoSleepTillBrooklyn-SingleInstance-8f3c2a17");
+
+/// Command-line flag: stop the running copy and exit, doing nothing if none is
+/// running. Never starts the app.
+const QUIT_FLAG: &str = "--quit";
+
+/// Command-line flag: everything `--quit` does, and then switch the display off.
+/// The display goes off whether or not a copy was running. Never starts the app.
+const MONITOR_OFF_FLAG: &str = "--monitor-off";
 
 #[derive(Default, NwgUi)]
 pub struct NoSleepTray {
@@ -73,6 +97,12 @@ pub struct NoSleepTray {
     #[nwg_control(parent: window)]
     #[nwg_events(OnNotice: [NoSleepTray::show_already_running_banner])]
     notice: nwg::Notice,
+
+    // Lets the background watcher thread shut the app down when a `--quit`
+    // launch asks for it, exactly as the tray menu's Exit does.
+    #[nwg_control(parent: window)]
+    #[nwg_events(OnNotice: [NoSleepTray::exit])]
+    quit_notice: nwg::Notice,
 
     // Fires every KEYPRESS_INTERVAL_SECS on the UI thread; each tick taps F15.
     #[nwg_control(interval: Duration::from_secs(KEYPRESS_INTERVAL_SECS), active: false)]
@@ -249,30 +279,111 @@ fn send_f15() {
     }
 }
 
+/// Create — or open, if the running copy already made it — one of the named
+/// auto-reset events the two copies talk through.
+fn named_event(name: PCWSTR) -> Option<HANDLE> {
+    unsafe { CreateEventW(None, BOOL(0), BOOL(0), name).ok() }
+}
+
+/// Signal a named event, waking the running copy's watcher thread for it.
+fn signal_event(name: PCWSTR) {
+    if let Some(event) = named_event(name) {
+        unsafe {
+            let _ = SetEvent(event);
+        }
+    }
+}
+
+/// Spawn a background watcher that pokes the UI thread through `sender` every
+/// time its event is signalled.
+///
+/// The event is opened by the new thread itself, through `open`, because
+/// neither a HANDLE nor the PCWSTR name it comes from is `Send`.
+fn watch_event(open: fn() -> Option<HANDLE>, sender: nwg::NoticeSender) {
+    std::thread::spawn(move || {
+        let Some(event) = open() else { return };
+        loop {
+            unsafe { WaitForSingleObject(event, INFINITE) };
+            sender.notice();
+        }
+    });
+}
+
+/// Switch the display off, the same way the classic "monitor off" desktop
+/// shortcut does: broadcast `WM_SYSCOMMAND` with `SC_MONITORPOWER` and lParam 2
+/// (`1` would be low power, `-1` powers the display back on). Any mouse move or
+/// keypress wakes the display again.
+fn monitor_off() {
+    unsafe {
+        SendMessageW(
+            HWND_BROADCAST,
+            WM_SYSCOMMAND,
+            WPARAM(SC_MONITORPOWER as usize),
+            LPARAM(2),
+        );
+    }
+}
+
+/// Block until the copy that was just asked to quit is really gone, giving up
+/// after a couple of seconds.
+///
+/// The display must not be switched off while that copy is still alive: it taps
+/// F15 every minute, and any input turns the display straight back on.
+///
+/// Liveness is read off the single-instance mutex, which the system destroys
+/// once the last handle to it closes — so failing to open it by name means the
+/// other process has exited. Our own handle, `mutex`, is closed first, as it
+/// would otherwise keep the name alive by itself.
+fn wait_for_exit(mutex: HANDLE) {
+    unsafe {
+        let _ = CloseHandle(mutex);
+    }
+
+    for _ in 0..100 {
+        match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, BOOL(0), SINGLE_INSTANCE_MUTEX) } {
+            Ok(handle) => unsafe {
+                let _ = CloseHandle(handle);
+            },
+            Err(_) => return,
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn main() {
+    let requested = |flag: &str| std::env::args_os().skip(1).any(|arg| arg == flag);
+    let quit_requested = requested(QUIT_FLAG);
+    let monitor_off_requested = requested(MONITOR_OFF_FLAG);
+
     // Single-instance guard: a named mutex. If it already exists, another copy
     // is running (handled below). The handle is intentionally held for the whole
     // process so the mutex lives on.
-    let _mutex = unsafe {
-        CreateMutexW(
-            None,
-            BOOL(0),
-            w!("NoSleepTillBrooklyn-SingleInstance-8f3c2a17"),
-        )
-    };
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        // Another copy is already running: signal it to re-show its tray banner,
-        // then exit silently without a window of our own.
-        unsafe {
-            if let Ok(event) = CreateEventW(
-                None,
-                BOOL(0),
-                BOOL(0),
-                w!("NoSleepTillBrooklyn-ShowBanner-8f3c2a17"),
-            ) {
-                let _ = SetEvent(event);
+    let mutex = unsafe { CreateMutexW(None, BOOL(0), SINGLE_INSTANCE_MUTEX) };
+    let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+
+    if quit_requested || monitor_off_requested {
+        // Ask the running copy to shut down. With nothing running there is
+        // nothing to stop — either way this launch never starts the app.
+        if already_running {
+            signal_event(QUIT_EVENT);
+
+            if monitor_off_requested {
+                if let Ok(mutex) = mutex {
+                    wait_for_exit(mutex);
+                }
             }
         }
+
+        if monitor_off_requested {
+            monitor_off();
+        }
+        return;
+    }
+
+    if already_running {
+        // Another copy is already running: signal it to re-show its tray banner,
+        // then exit silently without a window of our own.
+        signal_event(BANNER_EVENT);
         return;
     }
 
@@ -287,26 +398,11 @@ fn main() {
     // ~300 ms (via launch_timer) so the shell has settled the tray icon first.
     app.launch_timer.start();
 
-    // Background watcher: when a second copy signals the shared event, wake the
-    // UI thread (via Notice) to re-show the banner, as if launched afresh.
-    let sender = app.notice.sender();
-    std::thread::spawn(move || {
-        let event = match unsafe {
-            CreateEventW(
-                None,
-                BOOL(0),
-                BOOL(0),
-                w!("NoSleepTillBrooklyn-ShowBanner-8f3c2a17"),
-            )
-        } {
-            Ok(handle) => handle,
-            Err(_) => return,
-        };
-        loop {
-            unsafe { WaitForSingleObject(event, INFINITE) };
-            sender.notice();
-        }
-    });
+    // Background watchers: when another launch signals one of the shared
+    // events, wake the UI thread (via Notice) to re-show the banner, as if
+    // launched afresh, or to shut down.
+    watch_event(|| named_event(BANNER_EVENT), app.notice.sender());
+    watch_event(|| named_event(QUIT_EVENT), app.quit_notice.sender());
 
     nwg::dispatch_thread_events();
 }

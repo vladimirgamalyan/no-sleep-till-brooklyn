@@ -26,6 +26,12 @@ built by GitHub Actions. To build it yourself, see [Build](#build) below.
   not merely the idle auto-lock.
 - **Exit** (tray icon → right-click → *Exit*) releases the keep-awake request
   (`ES_CONTINUOUS`), stops the timer and terminates the process.
+- Launching it with **`--quit`** stops a running copy and exits, without ever
+  starting the app itself (see [Stopping it without the tray
+  menu](#stopping-it-without-the-tray-menu)).
+- Launching it with **`--monitor-off`** does the same and then switches the
+  display off (see [Switching the display off
+  too](#switching-the-display-off-too)).
 - Only a **single instance** runs at a time: a named-mutex guard makes a second
   launch exit silently (no window). Before it exits it pokes the running copy
   (via a named event) to show an "already running" tray notification, distinct
@@ -77,6 +83,46 @@ to register at startup — with the shell already up, and therefore no
 `TaskbarCreated` coming — would stay missing with nothing to notice. It also
 makes the obvious human reaction to a missing icon, starting the app again, do
 the right thing rather than exit silently.
+
+## Stopping it without the tray menu
+
+```sh
+NoSleepTillBrooklyn.exe --quit
+```
+
+The flag is for scripts and shortcuts: it stops a copy that is already running
+and exits. If nothing is running it does nothing at all and exits immediately —
+it never starts the app, so it is safe to fire blindly.
+
+Mechanically it is the single-instance path again. The launch sees the named
+mutex already taken, signals a second named event (the quit one, separate from
+the "already running" banner event), and returns. The running copy's watcher
+thread wakes its UI thread, which runs the same shutdown as the tray menu's
+**Exit**: release the keep-awake request, stop the timer, remove the tray icon
+and end the process. With the mutex free, nothing is signalled and the launch
+just returns.
+
+### Switching the display off too
+
+```sh
+NoSleepTillBrooklyn.exe --monitor-off
+```
+
+Everything `--quit` does, and then the display goes off — whether or not a copy
+was running, so this too is safe to fire blindly from a shortcut. Moving the
+mouse or pressing a key wakes the display back up; the app stays stopped.
+
+The display is switched off the way the classic "monitor off" shortcut does it,
+with no third-party helper: broadcast `WM_SYSCOMMAND` with `SC_MONITORPOWER` and
+lParam `2` (`1` would be low power, `-1` powers it back on).
+
+Before that, the launch waits for the copy it just stopped to actually exit. It
+must: a live copy taps F15 every minute, and that input would turn the display
+straight back on. Since a named kernel object lives only as long as a handle to
+it is open, the launch closes its own handle to the single-instance mutex and
+then polls the name — once the mutex can no longer be opened, the other process
+is gone. The wait gives up after two seconds so a wedged copy cannot make the
+shortcut hang.
 
 ## Build
 
