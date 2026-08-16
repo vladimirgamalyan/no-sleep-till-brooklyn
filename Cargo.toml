@@ -1,6 +1,6 @@
 [package]
 name = "no-sleep-till-brooklyn"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A tiny caffeine-style utility that keeps Windows awake while its window is open"
 license = "MIT"
